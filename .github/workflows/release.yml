@@ -12,15 +12,11 @@ permissions:
 
 jobs:
   build-linux:
-    runs-on: ubuntu-latest
+    # The oldest supported runner sets the glibc floor for the published binary.
+    runs-on: ubuntu-22.04
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev ca-certificates
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -31,20 +27,40 @@ jobs:
           go-version: '1.24.x'
           cache: false
 
+      - name: Check version matches tag
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          test "v$version" = "${GITHUB_REF_NAME}" || {
+            echo "Cargo.toml version v$version does not match tag ${GITHUB_REF_NAME}"
+            exit 1
+          }
+
+      - name: Test
+        run: cargo test --release
+
       - name: Build release binary
         run: cargo build --release
 
-      - name: Verify bundled converter notices
-        run: target/release/vol3sm licenses
-
-      - name: Package binary and converter licenses
+      - name: Verify binary
         run: |
-          mkdir -p target/release/licenses
-          cp vendor/dwarf2json/LICENSE.txt target/release/licenses/dwarf2json-LICENSE.txt
-          cp vendor/dwarf2json/vendor/github.com/spf13/pflag/LICENSE target/release/licenses/pflag-LICENSE.txt
-          tar -C target/release -czf vol3sm-linux-x86_64.tar.gz vol3sm licenses
+          target/release/vol3sm --version
+          target/release/vol3sm licenses > /dev/null
+          echo "Requires $(objdump -T target/release/vol3sm | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
 
-      - name: Upload release asset
+      - name: Package binary and licenses
+        run: |
+          mkdir -p dist/licenses
+          cp target/release/vol3sm dist/vol3sm-linux-x86_64
+          cp vendor/dwarf2json/LICENSE.txt dist/licenses/dwarf2json-LICENSE.txt
+          cp vendor/dwarf2json/vendor/github.com/spf13/pflag/LICENSE dist/licenses/pflag-LICENSE.txt
+          cp target/release/vol3sm dist/vol3sm
+          tar -C dist -czf dist/vol3sm-linux-x86_64.tar.gz vol3sm licenses
+          cd dist && sha256sum vol3sm-linux-x86_64 vol3sm-linux-x86_64.tar.gz > SHA256SUMS
+
+      - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: vol3sm-linux-x86_64.tar.gz
+          files: |
+            dist/vol3sm-linux-x86_64
+            dist/vol3sm-linux-x86_64.tar.gz
+            dist/SHA256SUMS
