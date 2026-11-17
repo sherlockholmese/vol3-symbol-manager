@@ -25,11 +25,24 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Go for the bundled converter
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          cache: false
+
       - name: Build release binary
         run: cargo build --release
 
-      - name: Package binary
-        run: tar -C target/release -czf vol3sm-linux-x86_64.tar.gz vol3sm
+      - name: Verify bundled converter notices
+        run: target/release/vol3sm licenses
+
+      - name: Package binary and converter licenses
+        run: |
+          mkdir -p target/release/licenses
+          cp vendor/dwarf2json/LICENSE.txt target/release/licenses/dwarf2json-LICENSE.txt
+          cp vendor/dwarf2json/vendor/github.com/spf13/pflag/LICENSE target/release/licenses/pflag-LICENSE.txt
+          tar -C target/release -czf vol3sm-linux-x86_64.tar.gz vol3sm licenses
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2

@@ -2,9 +2,12 @@ use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Args, Parser, Subcommand};
 use std::process::ExitCode;
 
+mod bundled;
 mod cache;
 mod commands;
+mod generate;
 mod github;
+mod packages;
 mod search;
 mod sources;
 mod symbols;
@@ -22,7 +25,7 @@ const STYLES: Styles = Styles::styled()
     .invalid(AnsiColor::Yellow.on_default())
     .error(AnsiColor::Red.on_default().effects(Effects::BOLD));
 
-/// Search and install Volatility 3 symbols
+/// Search, install and generate Volatility 3 symbols
 #[derive(Parser)]
 #[command(name = "vol3sm", version, styles = STYLES, disable_help_subcommand = true)]
 struct Cli {
@@ -43,11 +46,17 @@ enum Commands {
     /// Install a symbol by search id, source:path or banner
     Install(InstallArgs),
 
+    /// Generate Linux symbols from a kernel debug package
+    Generate(Box<generate::GenerateArgs>),
+
     /// List installed symbols
     Local,
 
     /// Print the symbols directory
     SymbolsDir,
+
+    /// Print licenses for the bundled dwarf2json
+    Licenses,
 }
 
 #[derive(Args)]
@@ -66,8 +75,13 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Commands::Search { query, limit } => cmd_search(&query, limit),
         Commands::Install(args) => cmd_install(args.path, args.banner),
+        Commands::Generate(args) => generate::cmd_generate(*args),
         Commands::Local => cmd_local(),
         Commands::SymbolsDir => cmd_symbols_dir(),
+        Commands::Licenses => {
+            bundled::print_licenses();
+            Ok(())
+        }
     };
 
     match result {

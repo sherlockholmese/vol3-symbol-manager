@@ -115,6 +115,19 @@ pub fn spinner(len: u64, message: &str) -> ProgressBar {
     pb
 }
 
+/// Spinner for one long step of unknown length, with elapsed time.
+pub fn activity(message: &str) -> ProgressBar {
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::with_template("{spinner:.cyan} {msg} {elapsed:.dim}")
+            .expect("valid activity template")
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "),
+    );
+    pb.set_message(message.to_string());
+    pb.enable_steady_tick(Duration::from_millis(80));
+    pb
+}
+
 pub fn download_bar(total: Option<u64>) -> ProgressBar {
     match total {
         Some(n) => {
