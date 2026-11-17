@@ -1,75 +1,71 @@
+use crate::sources::USER_AGENT;
+use crate::ui;
 use anyhow::{Context, Result};
-use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-pub fn download_symbol(url: &str, dest_dir: &Path, symbol_path: &str) -> Result<()> {
+pub enum Download {
+    Installed(PathBuf),
+    AlreadyPresent(PathBuf),
+}
+
+pub fn download_symbol(url: &str, dest_dir: &Path, symbol_path: &str) -> Result<Download> {
     let filename = Path::new(symbol_path)
         .file_name()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine filename from: {}", symbol_path))?;
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine a file name from {}", symbol_path))?;
     let dest_file = dest_dir.join(filename);
 
     if dest_file.exists() {
-        println!("Already installed: {}", dest_file.display());
-        return Ok(());
+        return Ok(Download::AlreadyPresent(dest_file));
     }
 
     let client = reqwest::blocking::Client::builder()
-        .user_agent("vol3sm/0.1.0")
+        .user_agent(USER_AGENT)
         .build()?;
     let mut resp = client
         .get(url)
         .send()
-        .with_context(|| format!("Failed to download {}", url))?;
+        .with_context(|| format!("Download failed for {}", url))?;
 
     if !resp.status().is_success() {
-        anyhow::bail!("HTTP {} downloading symbol", resp.status());
+        return Err(ui::user_error(
+            format!("Download failed with HTTP {}", resp.status()),
+            Some(url),
+        ));
     }
 
-    let pb = match resp.content_length() {
-        Some(n) => {
-            let pb = ProgressBar::new(n);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template(
-                        "  {spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
-                    )?
-                    .progress_chars("=>-"),
-            );
-            pb
-        }
-        None => {
-            let pb = ProgressBar::new_spinner();
-            pb.set_style(
-                ProgressStyle::default_spinner()
-                    .template("  {spinner:.green} {bytes} downloaded")?,
-            );
-            pb
-        }
-    };
+    let pb = ui::download_bar(resp.content_length());
 
-    // Write to a .part file, rename on success
+    // Write to a .part file and rename on success so a failed download never
+    // leaves a truncated symbol behind.
     let tmp = dest_dir.join(format!("{}.part", filename.to_string_lossy()));
-    {
+    let written = (|| -> Result<()> {
         let mut file =
             fs::File::create(&tmp).with_context(|| format!("Cannot create {}", tmp.display()))?;
         let mut buf = [0u8; 16384];
         loop {
-            let n = resp.read(&mut buf).context("Read error during download")?;
+            let n = resp
+                .read(&mut buf)
+                .context("Connection lost during download")?;
             if n == 0 {
                 break;
             }
             file.write_all(&buf[..n])
-                .context("Write error during download")?;
+                .with_context(|| format!("Cannot write {}", tmp.display()))?;
             pb.inc(n as u64);
         }
+        Ok(())
+    })();
+    pb.finish_and_clear();
+
+    if let Err(err) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
     }
-    pb.finish_with_message("done");
 
     fs::rename(&tmp, &dest_file)
-        .with_context(|| format!("Failed to move {} → {}", tmp.display(), dest_file.display()))?;
+        .with_context(|| format!("Cannot move {} to {}", tmp.display(), dest_file.display()))?;
 
-    println!("Installed: {}", dest_file.display());
-    Ok(())
+    Ok(Download::Installed(dest_file))
 }

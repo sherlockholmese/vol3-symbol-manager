@@ -56,24 +56,47 @@ impl SymbolEntry {
     }
 }
 
-pub fn fetch_all_sources() -> Result<Vec<SymbolEntry>> {
+pub const USER_AGENT: &str = concat!("vol3sm/", env!("CARGO_PKG_VERSION"));
+
+/// Fetch every index concurrently. `on_done` runs once per finished source.
+pub fn fetch_all_sources(on_done: impl Fn() + Sync) -> Result<Vec<SymbolEntry>> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(USER_AGENT)
+        .build()?;
+
+    let results = std::thread::scope(|scope| {
+        let handles = SOURCES
+            .iter()
+            .map(|source| {
+                let client = &client;
+                let on_done = &on_done;
+                scope.spawn(move || {
+                    let result = fetch_source(client, source);
+                    on_done();
+                    result
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("index fetch thread panicked"))
+            .collect::<Vec<_>>()
+    });
+
     let mut entries = Vec::new();
-    for source in SOURCES {
-        entries.extend(fetch_source(source)?);
+    for result in results {
+        entries.extend(result?);
     }
     Ok(entries)
 }
 
-pub fn fetch_source(source: &Source) -> Result<Vec<SymbolEntry>> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("vol3sm/0.1.0")
-        .build()?;
+fn fetch_source(client: &reqwest::blocking::Client, source: &Source) -> Result<Vec<SymbolEntry>> {
     let resp = client
         .get(source.index_url)
         .send()
-        .with_context(|| format!("Failed to fetch {}", source.name))?;
+        .with_context(|| format!("{} index unreachable", source.name))?;
     if !resp.status().is_success() {
-        anyhow::bail!("HTTP {} fetching index from {}", resp.status(), source.name);
+        anyhow::bail!("{} index returned HTTP {}", source.name, resp.status());
     }
 
     match source.format {
@@ -88,8 +111,8 @@ pub fn fetch_source(source: &Source) -> Result<Vec<SymbolEntry>> {
                         source_id: source.id.to_string(),
                         source_name: source.name.to_string(),
                         banner: banner.clone(),
-                        download_url: format!("{}/{}", ABYSS_RAW_BASE, path),
-                        path,
+                        download_url: abyss_download_url(&path),
+                        path: abyss_display_path(&path),
                     })
                 })
                 .collect())
@@ -180,6 +203,50 @@ fn remote_bucket_entries(
         .collect()
 }
 
+fn abyss_download_url(path: &str) -> String {
+    if path.starts_with("https://") || path.starts_with("http://") {
+        path.to_string()
+    } else {
+        format!("{}/{}", ABYSS_RAW_BASE, path)
+    }
+}
+
+/// Abyss now indexes release asset URLs such as
+/// `.../releases/download/isf-Debian-amd64-5.2.0-rt/Debian_5.2.0.json.xz`.
+/// Turn the tag back into the repository's `Debian/amd64/5.2.0-rt/` layout.
+fn abyss_display_path(path: &str) -> String {
+    let Some((_, rest)) = path.split_once("/releases/download/") else {
+        return percent_decode(path);
+    };
+    let (tag, file) = rest.split_once('/').unwrap_or(("", rest));
+    let tag = tag.strip_prefix("isf-").unwrap_or(tag);
+    let mut parts = tag
+        .splitn(3, '-')
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>();
+    parts.push(file);
+    percent_decode(&parts.join("/"))
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(hex) = input.get(i + 1..i + 3)
+            && let Ok(byte) = u8::from_str_radix(hex, 16)
+        {
+            out.push(byte);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn decode_banner(encoded: &str) -> Result<String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(encoded)
@@ -207,7 +274,32 @@ fn is_symbol_path(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_banner, display_path_from_url, is_symbol_path};
+    use super::{
+        abyss_display_path, abyss_download_url, decode_banner, display_path_from_url,
+        is_symbol_path,
+    };
+
+    #[test]
+    fn abyss_release_urls_map_to_repository_layout() {
+        let url = "https://github.com/Abyss-W4tcher/volatility3-symbols/releases/download/isf-Debian-amd64-4.9.0/Debian_4.9.0-3-amd64_4.9.30-2%2Bdeb9u5_amd64.json.xz";
+        assert_eq!(
+            abyss_display_path(url),
+            "Debian/amd64/4.9.0/Debian_4.9.0-3-amd64_4.9.30-2+deb9u5_amd64.json.xz"
+        );
+        assert_eq!(abyss_download_url(url), url);
+
+        let rt = "https://github.com/Abyss-W4tcher/volatility3-symbols/releases/download/isf-Debian-amd64-6.1.0-rt/x.json.xz";
+        assert_eq!(abyss_display_path(rt), "Debian/amd64/6.1.0-rt/x.json.xz");
+
+        let mac = "https://github.com/Abyss-W4tcher/volatility3-symbols/releases/download/isf-macOS-10.15/m.json.xz";
+        assert_eq!(abyss_display_path(mac), "macOS/10.15/m.json.xz");
+    }
+
+    #[test]
+    fn abyss_relative_paths_still_resolve() {
+        assert_eq!(abyss_display_path("Ubuntu/a.json.xz"), "Ubuntu/a.json.xz");
+        assert!(abyss_download_url("Ubuntu/a.json.xz").ends_with("/master/Ubuntu/a.json.xz"));
+    }
 
     #[test]
     fn decodes_remote_isf_banner() {

@@ -9,10 +9,10 @@ pub fn find_symbols_dir() -> Result<PathBuf> {
         if path.is_dir() {
             return Ok(path);
         }
-        anyhow::bail!(
-            "VOL3_SYMBOLS_DIR='{}' does not exist or is not a directory",
-            dir
-        );
+        return Err(crate::ui::user_error(
+            format!("VOL3_SYMBOLS_DIR is not a directory: {dir}"),
+            None,
+        ));
     }
 
     let system_patterns = [
@@ -39,11 +39,10 @@ pub fn find_symbols_dir() -> Result<PathBuf> {
         }
     }
 
-    anyhow::bail!(
-        "Could not find volatility3 symbols directory.\n\
-         Set the VOL3_SYMBOLS_DIR environment variable to point to it.\n\
-         Example: export VOL3_SYMBOLS_DIR=/opt/volatility3/lib/python3.12/site-packages/volatility3/symbols"
-    )
+    Err(crate::ui::user_error(
+        "Volatility 3 symbols directory not found",
+        Some("export VOL3_SYMBOLS_DIR=<path to volatility3/symbols>"),
+    ))
 }
 
 /// Resolve glob pattern and return the lexicographically last match (highest python3.x).

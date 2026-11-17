@@ -28,7 +28,17 @@ pub fn read_last_search_results() -> Result<LastSearchResults> {
             err
         )
     })?;
-    Ok(serde_json::from_slice(&data)?)
+    let mut cache: LastSearchResults = serde_json::from_slice(&data)?;
+    cache.entries.iter_mut().for_each(repair_legacy_url);
+    Ok(cache)
+}
+
+/// Caches written before 1.1.0 prefixed Abyss release URLs with the raw
+/// repository base, producing `.../raw/master/https://...`.
+fn repair_legacy_url(entry: &mut SymbolEntry) {
+    if let Some(pos) = entry.download_url.find("/https://") {
+        entry.download_url = entry.download_url[pos + 1..].to_string();
+    }
 }
 
 pub fn search_cache_path() -> PathBuf {
@@ -68,7 +78,7 @@ mod tests {
             std::env::set_var("VOL3SM_SEARCH_CACHE", &cache_path);
         }
 
-        let entries = vec![
+        let entries = [
             entry(
                 "abyss",
                 "Linux version 6.1",

@@ -1,252 +1,223 @@
-use crate::sources::SymbolEntry;
-use colored::Colorize;
+use crate::ui::{accent, muted};
 use std::collections::BTreeMap;
 
-pub fn render_search_tree(results: &[&SymbolEntry], shown: usize) -> String {
-    let mut tree = PathTree::default();
-    let mut has_paths = false;
+/// A rendered path tree plus the order its files were printed in.
+///
+/// `order[i]` is the index into the input paths of the file printed i-th.
+/// When the tree is numbered, that position is the id shown in the gutter, so
+/// ids always read top to bottom.
+pub struct Rendered {
+    pub text: String,
+    pub order: Vec<usize>,
+}
 
-    for (id, entry) in results.iter().take(shown).enumerate() {
-        tree.insert(&entry.display_path(), id);
-        has_paths = true;
+pub fn render_tree(paths: &[String], numbered: bool) -> Rendered {
+    let mut root = Node::default();
+    for (index, path) in paths.iter().enumerate() {
+        root.insert(path, index);
     }
 
-    let mut output = String::new();
-    output.push_str(&format!("{}\n", "Matched symbol paths".bold()));
-
-    if has_paths {
-        tree.render_into(&mut output, "");
-        let (dirs, files) = tree.counts();
-        output.push_str(
-            &format!(
-                "\n{} {} • {} {}",
-                dirs,
-                if dirs == 1 {
-                    "directory"
-                } else {
-                    "directories"
-                },
-                files,
-                if files == 1 { "file" } else { "files" }
-            )
-            .dimmed()
-            .to_string(),
-        );
+    let gutter = if numbered {
+        paths.len().saturating_sub(1).to_string().len()
     } else {
-        output.push_str("└── (no symbol path)\n\n0 directories, 0 files");
+        0
+    };
+
+    let mut out = Out {
+        lines: Vec::new(),
+        order: Vec::new(),
+        gutter,
+        numbered,
+    };
+    root.render_children(&mut out, None);
+
+    Rendered {
+        text: out.lines.join("\n"),
+        order: out.order,
     }
-
-    output.push_str(&format!(
-        "\n\n{}",
-        "Use: vol3sm install <id>  or  vol3sm install \"<source:path>\"".dimmed()
-    ));
-
-    output.trim_end().to_string()
 }
 
 #[derive(Default)]
-struct PathTree {
-    children: BTreeMap<String, PathTree>,
-    is_file: bool,
-    file_id: Option<usize>,
+struct Node {
+    children: BTreeMap<String, Node>,
+    files: Vec<usize>,
 }
 
-impl PathTree {
-    fn insert(&mut self, path: &str, file_id: usize) {
+struct Out {
+    lines: Vec<String>,
+    order: Vec<usize>,
+    gutter: usize,
+    numbered: bool,
+}
+
+impl Out {
+    fn push(&mut self, prefix: &str, label: String, file: Option<usize>) {
+        let gutter = match (self.numbered, file) {
+            (false, _) => String::new(),
+            (true, Some(_)) => format!("{:>w$}  ", self.order.len(), w = self.gutter),
+            (true, None) => " ".repeat(self.gutter + 2),
+        };
+        if let Some(index) = file {
+            self.order.push(index);
+        }
+        self.lines.push(format!("{gutter}{prefix}{label}"));
+    }
+}
+
+impl Node {
+    fn insert(&mut self, path: &str, index: usize) {
         let mut current = self;
-        let mut segments = path.split('/').filter(|s| !s.is_empty()).peekable();
-        while let Some(segment) = segments.next() {
+        for segment in path.split('/').filter(|s| !s.is_empty()) {
             current = current.children.entry(segment.to_string()).or_default();
-            if segments.peek().is_none() {
-                current.is_file = true;
-                current.file_id = Some(file_id);
-            }
         }
+        current.files.push(index);
     }
 
-    fn render_into(&self, output: &mut String, prefix: &str) {
-        let count = self.children.len();
-        for (index, (name, child)) in self.children.iter().enumerate() {
-            let is_last = index + 1 == count;
-            let branch = if is_last { "└──" } else { "├──" };
+    /// `prefix` is `None` at the root, where entries print flush left without
+    /// branch glyphs.
+    fn render_children(&self, out: &mut Out, prefix: Option<&str>) {
+        let rows = self
+            .children
+            .iter()
+            .flat_map(|(name, child)| {
+                let files = child.files.iter().map(move |&i| Row::File(name, i));
+                let dir = (!child.children.is_empty()).then_some(Row::Dir(name, child));
+                files.chain(dir)
+            })
+            .collect::<Vec<_>>();
 
-            if child.is_file {
-                output.push_str(&format!(
-                    "{}{} {}{}\n",
-                    prefix,
-                    branch.dimmed(),
-                    style_file_name(name),
-                    style_file_id(child.file_id)
-                ));
-            } else {
-                let (collapsed_name, collapsed_child) = child.collapsed_dir_name(name);
-                output.push_str(&format!(
-                    "{}{} {}\n",
-                    prefix,
-                    branch.dimmed(),
-                    style_dir_name(&collapsed_name)
-                ));
-                let cont = if is_last {
-                    "    ".to_string()
-                } else {
-                    "│   ".dimmed().to_string()
-                };
-                let child_prefix = format!("{prefix}{cont}");
-                collapsed_child.render_into(output, &child_prefix);
-            }
-        }
-    }
-
-    fn counts(&self) -> (usize, usize) {
-        let mut dirs = 0usize;
-        let mut files = 0usize;
-
-        for child in self.children.values() {
-            if child.is_file {
-                files += 1;
-                continue;
-            }
-
-            dirs += 1;
-            let (subdirs, subfiles) = child.counts();
-            dirs += subdirs;
-            files += subfiles;
-        }
-
-        (dirs, files)
-    }
-
-    fn collapsed_dir_name<'a>(&'a self, name: &str) -> (String, &'a PathTree) {
-        let mut parts = vec![name.to_string()];
-        let mut current = self;
-
-        loop {
-            if current.is_file || current.children.len() != 1 {
-                break;
-            }
-
-            let Some((child_name, child)) = current.children.iter().next() else {
-                break;
+        let count = rows.len();
+        for (i, row) in rows.into_iter().enumerate() {
+            let last = i + 1 == count;
+            let (head, tail) = match prefix {
+                None => (String::new(), String::new()),
+                Some(p) => {
+                    let branch = if last { "└── " } else { "├── " };
+                    let cont = if last { "    " } else { "│   " };
+                    (
+                        format!("{p}{}", muted(branch)),
+                        format!("{p}{}", muted(cont)),
+                    )
+                }
             };
 
-            if child.is_file {
+            match row {
+                Row::File(name, index) => out.push(&head, file_label(name), Some(index)),
+                Row::Dir(name, child) => {
+                    let (joined, inner) = child.collapse(name);
+                    out.push(&head, dir_label(&joined, prefix.is_none()), None);
+                    inner.render_children(out, Some(&tail));
+                }
+            }
+        }
+    }
+
+    /// Fold chains of single-child directories into one `a/b/c/` row.
+    fn collapse<'a>(&'a self, name: &str) -> (String, &'a Node) {
+        let mut parts = vec![name];
+        let mut current = self;
+        while current.files.is_empty() && current.children.len() == 1 {
+            let (child_name, child) = current.children.iter().next().expect("one child");
+            if child.children.is_empty() {
                 break;
             }
-
-            parts.push(child_name.clone());
+            parts.push(child_name);
             current = child;
         }
-
         (format!("{}/", parts.join("/")), current)
     }
 }
 
-fn style_dir_name(name: &str) -> String {
-    name.blue().bold().to_string()
+enum Row<'a> {
+    File(&'a str, usize),
+    Dir(&'a str, &'a Node),
 }
 
-fn style_file_name(name: &str) -> String {
+fn dir_label(name: &str, top_level: bool) -> String {
+    if top_level && let Some((source, rest)) = name.split_once(':') {
+        return format!("{}{}", muted(&format!("{source}:")), rest);
+    }
+    name.to_string()
+}
+
+fn file_label(name: &str) -> String {
     for ext in [".json.xz", ".json.gz", ".json"] {
         if let Some(base) = name.strip_suffix(ext) {
-            return format!("{}{}", base.cyan().bold(), ext.dimmed());
+            return format!("{}{}", accent(base), muted(ext));
         }
     }
-
-    name.cyan().bold().to_string()
-}
-
-fn style_file_id(file_id: Option<usize>) -> String {
-    file_id
-        .map(|id| format!(" {}", format!("[{}]", id).dimmed()))
-        .unwrap_or_default()
+    accent(name).to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn entry(source_id: &str, banner: &str, path: &str) -> SymbolEntry {
-        SymbolEntry {
-            source_id: source_id.to_string(),
-            source_name: source_id.to_string(),
-            banner: banner.to_string(),
-            path: path.to_string(),
-            download_url: format!("https://example.invalid/{path}"),
-        }
+    fn plain(paths: &[&str], numbered: bool) -> Rendered {
+        colored::control::set_override(false);
+        let paths = paths.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+        render_tree(&paths, numbered)
     }
 
     #[test]
-    fn render_search_tree_collapses_single_child_directories() {
-        let results = vec![
-            entry(
-                "abyss",
-                "Linux version 6.1",
-                "Debian/amd64/6.1.0/1/debian.json.xz",
-            ),
-            entry(
-                "abyss",
-                "Linux version 6.1",
-                "Debian/amd64/6.1.0/1/debian-debug.json.xz",
-            ),
-        ];
-        let result_refs = results.iter().collect::<Vec<_>>();
-
-        let rendered = render_search_tree(&result_refs, 2);
-
-        assert!(rendered.contains("Matched symbol paths"));
-        assert!(rendered.contains("abyss:Debian/amd64/6.1.0/1/"));
-        assert!(rendered.contains("debian"));
-        assert!(rendered.contains("[0]"));
-        assert!(rendered.contains("[1]"));
-        assert!(rendered.contains("2 files"));
-        assert!(!rendered.contains("\n.\n"));
+    fn collapses_single_child_directories() {
+        let r = plain(
+            &[
+                "abyss:Debian/amd64/6.1.0/debian.json.xz",
+                "abyss:Debian/amd64/6.1.0/debian-debug.json.xz",
+            ],
+            true,
+        );
+        assert_eq!(
+            r.text,
+            "   abyss:Debian/amd64/6.1.0/\n\
+             0  ├── debian-debug.json.xz\n\
+             1  └── debian.json.xz"
+        );
+        assert_eq!(r.order, vec![1, 0]);
     }
 
     #[test]
-    fn render_search_tree_counts_directories_after_collapsing() {
-        let results = vec![
-            entry(
-                "abyss",
-                "Linux version 5.4",
-                "Ubuntu/amd64/5.4.0/1/ubuntu.json.xz",
-            ),
-            entry(
-                "abyss",
-                "Linux version 5.4",
-                "Ubuntu/arm64/5.4.0/1/ubuntu-arm.json.xz",
-            ),
-        ];
-        let result_refs = results.iter().collect::<Vec<_>>();
-
-        let rendered = render_search_tree(&result_refs, 2);
-
-        assert!(rendered.contains("7 directories"));
-        assert!(rendered.contains("2 files"));
-        assert!(rendered.contains("abyss:Ubuntu/"));
-        assert!(rendered.contains("amd64/5.4.0/1/"));
-        assert!(rendered.contains("arm64/5.4.0/1/"));
+    fn ids_follow_display_order_not_input_order() {
+        let r = plain(
+            &[
+                "abyss:Ubuntu/amd64/b.json.xz",
+                "leludo:profiles/a.json.xz",
+                "abyss:Ubuntu/amd64/a.json.xz",
+            ],
+            true,
+        );
+        assert_eq!(r.order, vec![2, 0, 1]);
+        let ids = r
+            .text
+            .lines()
+            .filter_map(|l| l.split_whitespace().next()?.parse::<usize>().ok())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![0, 1, 2]);
     }
 
     #[test]
-    fn render_search_tree_shows_ids_next_to_files() {
-        let results = vec![
-            entry(
-                "abyss",
-                "Linux version 6.1",
-                "Debian/amd64/6.1.0/1/debian.json.xz",
-            ),
-            entry(
-                "leludo",
-                "Linux version 6.1",
-                "profiles/debian/debian.json.xz",
-            ),
-        ];
-        let result_refs = results.iter().collect::<Vec<_>>();
+    fn gutter_right_aligns_multi_digit_ids() {
+        let paths = (0..11)
+            .map(|i| format!("p0d:linux/{i:02}.json"))
+            .collect::<Vec<_>>();
+        let refs = paths.iter().map(String::as_str).collect::<Vec<_>>();
+        let r = plain(&refs, true);
+        let lines = r.text.lines().collect::<Vec<_>>();
+        assert_eq!(lines[0], "    p0d:linux/");
+        assert!(lines[1].starts_with(" 0  ├── "));
+        assert!(lines[11].starts_with("10  └── "));
+    }
 
-        let rendered = render_search_tree(&result_refs, 2);
+    #[test]
+    fn unnumbered_tree_has_no_gutter() {
+        let r = plain(&["linux/a.json.xz", "mac/b.json.xz"], false);
+        assert_eq!(r.text, "linux/\n└── a.json.xz\nmac/\n└── b.json.xz");
+    }
 
-        assert!(rendered.contains("[0]"));
-        assert!(rendered.contains("[1]"));
-        assert!(rendered.contains("vol3sm install <id>"));
+    #[test]
+    fn duplicate_paths_each_get_a_row() {
+        let r = plain(&["abyss:x/a.json", "abyss:x/a.json"], true);
+        assert_eq!(r.order.len(), 2);
     }
 }

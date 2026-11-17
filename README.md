@@ -36,10 +36,20 @@ Search using snippets of a banner, kernel version, or OS name. The search utiliz
 ```bash
 vol3sm search "ubuntu 6.2.0 aws"
 ```
-*Output will display a tree of matched symbols and assign an `[ID]` to each file.*
+```
+8 of 54 matches for ubuntu 6.2.0 aws
+
+   abyss:Ubuntu/amd64/6.2.0/
+0  ├── Ubuntu_6.2.0-1004-aws_6.2.0-1004.4_amd64.json.xz
+1  ├── Ubuntu_6.2.0-1005-aws_6.2.0-1005.5_amd64.json.xz
+...
+
+install  vol3sm install <id>
+more     --limit 54
+```
 
 ### 2. Install a Symbol
-You can install a symbol easily using the `[ID]` provided by your last search, or by providing the exact kernel banner.
+You can install a symbol easily using the id printed by your last search, or by providing the exact kernel banner.
 
 **By ID (from previous search):**
 ```bash
@@ -48,7 +58,7 @@ vol3sm install 0
 
 **By Source Path:**
 ```bash
-vol3sm install "abyss:Ubuntu/amd64/6.2.0/1007/aws/Ubuntu_6.2.0-1007-aws_amd64.json.xz"
+vol3sm install "abyss:Ubuntu/amd64/6.2.0/Ubuntu_6.2.0-1007-aws_6.2.0-1007.7_amd64.json.xz"
 ```
 
 **By Exact Banner:**

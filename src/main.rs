@@ -1,5 +1,6 @@
-use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::builder::styling::{AnsiColor, Effects, Styles};
+use clap::{Args, Parser, Subcommand};
+use std::process::ExitCode;
 
 mod cache;
 mod commands;
@@ -8,15 +9,22 @@ mod search;
 mod sources;
 mod symbols;
 mod tree;
+mod ui;
 
 use commands::{cmd_install, cmd_local, cmd_search, cmd_symbols_dir};
 
+const STYLES: Styles = Styles::styled()
+    .header(AnsiColor::White.on_default().effects(Effects::BOLD))
+    .usage(AnsiColor::White.on_default().effects(Effects::BOLD))
+    .literal(AnsiColor::Cyan.on_default())
+    .placeholder(AnsiColor::White.on_default().effects(Effects::DIMMED))
+    .valid(AnsiColor::Cyan.on_default())
+    .invalid(AnsiColor::Yellow.on_default())
+    .error(AnsiColor::Red.on_default().effects(Effects::BOLD));
+
+/// Search and install Volatility 3 symbols
 #[derive(Parser)]
-#[command(name = "vol3sm")]
-#[command(
-    about = "Volatility3 symbol manager — search and install ISF symbols from public symbol indexes"
-)]
-#[command(version)]
+#[command(name = "vol3sm", version, styles = STYLES, disable_help_subcommand = true)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -24,37 +32,49 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Search for symbols by kernel banner or filename pattern
+    /// Find symbols by banner, distro, kernel or file name
     Search {
-        /// Query string: banner snippet, distro name, kernel version, arch, etc.
         query: String,
-        /// Maximum results to display
-        #[arg(short, long, default_value = "20")]
+        /// Results to show
+        #[arg(short, long, default_value_t = 20, value_name = "N")]
         limit: usize,
     },
 
-    /// Download and install a symbol into volatility3
-    Install {
-        /// Repository path or numeric id from the last search results
-        path: Option<String>,
-        /// Exact kernel banner string (from `vol.py banners` output)
-        #[arg(short, long, value_name = "BANNER")]
-        banner: Option<String>,
-    },
+    /// Install a symbol by search id, source:path or banner
+    Install(InstallArgs),
 
-    /// List locally installed symbol files
+    /// List installed symbols
     Local,
 
-    /// Print the detected volatility3 symbols directory
+    /// Print the symbols directory
     SymbolsDir,
 }
 
-fn main() -> Result<()> {
+#[derive(Args)]
+#[group(required = true, multiple = false)]
+struct InstallArgs {
+    /// Search id or source:path
+    #[arg(value_name = "ID|PATH")]
+    path: Option<String>,
+    /// Exact banner from `vol.py -f <dump> banners`
+    #[arg(short, long)]
+    banner: Option<String>,
+}
+
+fn main() -> ExitCode {
     let cli = Cli::parse();
-    match cli.command {
+    let result = match cli.command {
         Commands::Search { query, limit } => cmd_search(&query, limit),
-        Commands::Install { path, banner } => cmd_install(path, banner),
+        Commands::Install(args) => cmd_install(args.path, args.banner),
         Commands::Local => cmd_local(),
         Commands::SymbolsDir => cmd_symbols_dir(),
+    };
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            ui::print_error(&err);
+            ExitCode::FAILURE
+        }
     }
 }

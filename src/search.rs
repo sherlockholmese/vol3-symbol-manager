@@ -172,10 +172,12 @@ fn score_token_against_field(token: &str, field: &SearchField, field_idx: usize)
             }
         }
 
-        if allow_fuzzy && token.len() >= 3
-            && let Some(subscore) = subsequence_score(token, candidate) {
-                best = best.max(base + subscore.min(18) as i32);
-            }
+        if allow_fuzzy
+            && token.len() >= 3
+            && let Some(subscore) = subsequence_score(token, candidate)
+        {
+            best = best.max(base + subscore.min(18) as i32);
+        }
     }
 
     best
@@ -225,10 +227,7 @@ fn subsequence_score(needle: &str, haystack: &str) -> Option<usize> {
             }
         }
 
-        match found {
-            Some(idx) => positions.push(idx),
-            None => return None,
-        }
+        positions.push(found?);
     }
 
     let span = positions.last()? - positions.first()? + 1;
